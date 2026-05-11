@@ -1,44 +1,69 @@
 import uuid
 import time
 import httpx
-from fastapi import FastAPI,Depends,Request
+
+from fastapi import FastAPI, Depends
+from pydantic import BaseModel
+
+from context import RequestContext
 from middleware.auth import verify_jwt
 from middleware.rate_limit import check_rate_limit
 from observability.logger import log_request
-from pydantic import BaseModel
-from context import RequestContext
+from scanning.pii import scan_pii
 
-app=FastAPI(title="Sentinel Gateway",version="0.1.0")
+app = FastAPI(title="SENTINEL Gateway", version="0.1.0")
 
 class ChatRequest(BaseModel):
-    prompt:str
-    model:str="phi3:mini"
+    prompt: str
+    model: str = "phi3:mini"
 
 class ChatResponse(BaseModel):
-    request_id:str
-    response:str
-    model_used:str
-    risk_score:float
-    user_id:str
-    role:str
+    request_id: str
+    response: str
+    model_used: str
+    risk_score: float
+    user_id: str
+    role: str
+    pii_detected: bool
+    pii_entities: list
 
-@app.post("/chat",response_model=ChatResponse)
-async def chat(request:ChatRequest, claims:dict=Depends(verify_jwt)):
-    start_time=time.time()
-    ctx=RequestContext(
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest, claims: dict = Depends(verify_jwt)):
+
+    start_time = time.time()
+
+    # Build request context
+    ctx = RequestContext(
         request_id=str(uuid.uuid4()),
         user_id=claims["user_id"],
         role=claims["role"],
         raw_prompt=request.prompt,
-        clean_prompt=request.prompt.strip()
+        clean_prompt=request.prompt,
     )
-    check_rate_limit(ctx.user_id, ctx.role)
-    ollama_response=await call_ollama(ctx.clean_prompt,request.model)
 
-    ctx.model_used=request.model
-    ctx.latency_ms=int((time.time()-start_time)*1000)
-    ctx.policy_decision="allow"
+    # Layer 2 — Rate limit check
+    check_rate_limit(ctx.user_id, ctx.role)
+
+    # Layer 3 — PII scan and redaction
+    ctx = await scan_pii(ctx)
+
+    # Forward CLEAN prompt to Ollama (never raw)
+    ollama_response = await call_ollama(ctx.clean_prompt, request.model)
+
+    # Update context
+    ctx.model_used = request.model
+    ctx.latency_ms = int((time.time() - start_time) * 1000)
+    ctx.policy_decision = "allow"
+
+    # Get list of detected entity types for response
+    pii_entities = [
+        f.description for f in ctx.findings
+        if f.scanner == "pii"
+    ]
+
+    # Log the request
     log_request(ctx)
+
     return ChatResponse(
         request_id=ctx.request_id,
         response=ollama_response,
@@ -46,21 +71,23 @@ async def chat(request:ChatRequest, claims:dict=Depends(verify_jwt)):
         risk_score=ctx.risk_score,
         user_id=ctx.user_id,
         role=ctx.role,
+        pii_detected=len(pii_entities) > 0,
+        pii_entities=pii_entities,
     )
 
 @app.get("/health")
 async def health():
-    return {"status":"ok","service":"sentinel-gateway"}
+    return {"status": "ok", "service": "sentinel-gateway"}
 
-async def call_ollama(prompt:str,model:str)->str:
+async def call_ollama(prompt: str, model: str) -> str:
     async with httpx.AsyncClient(timeout=120.0) as client:
-        response=await client.post(
+        response = await client.post(
             "http://ollama:11434/api/generate",
             json={
-                "model":model,
-                "prompt":prompt,
-                "stream":False
+                "model": model,
+                "prompt": prompt,
+                "stream": False
             }
         )
-        data=response.json()
-        return data.get("response","No response from Model :(")
+        data = response.json()
+        return data.get("response", "No response from model")
