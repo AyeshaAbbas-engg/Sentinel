@@ -2,7 +2,7 @@ import uuid
 import time
 import httpx
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 
 from context import RequestContext
@@ -11,8 +11,12 @@ from middleware.rate_limit import check_rate_limit
 from observability.logger import log_request
 from scanning.pii import scan_pii
 from scanning.injection import scan_injection
+from scanning.risk import compute_risk_score, should_block, get_risk_level
+from scanning.output import scan_output
 
-app = FastAPI(title="SENTINEL Gateway", version="0.1.0")
+app = FastAPI(title="SENTINEL Gateway", version="1.0.0")
+
+# ── Request/Response Models ──────────────────────────────
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -23,17 +27,23 @@ class ChatResponse(BaseModel):
     response: str
     model_used: str
     risk_score: float
+    risk_level: str
     user_id: str
     role: str
     pii_detected: bool
     pii_entities: list
     injection_detected: bool
+    output_flagged: bool
+    policy_decision: str
+
+# ── Main Endpoint ────────────────────────────────────────
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, claims: dict = Depends(verify_jwt)):
 
     start_time = time.time()
 
+    # ── Build Request Context ────────────────────────────
     ctx = RequestContext(
         request_id=str(uuid.uuid4()),
         user_id=claims["user_id"],
@@ -42,53 +52,82 @@ async def chat(request: ChatRequest, claims: dict = Depends(verify_jwt)):
         clean_prompt=request.prompt,
     )
 
-    # Layer 2 — Rate limit
+    # ── Layer 2: Rate Limiting ───────────────────────────
     check_rate_limit(ctx.user_id, ctx.role)
 
-    # Layer 3a — PII scan
+    # ── Layer 3a: PII Scan ───────────────────────────────
     ctx = await scan_pii(ctx)
 
-    # Layer 3b — Injection scan
+    # ── Layer 3b: Injection Scan ─────────────────────────
     ctx = scan_injection(ctx)
 
-    # Check if injection was detected
-    injection_findings = [f for f in ctx.findings if f.scanner == "injection"]
-    injection_detected = len(injection_findings) > 0
+    # ── Layer 3c: Risk Aggregation ───────────────────────
+    ctx = compute_risk_score(ctx)
 
-    # Block if risk score is critical
-    if ctx.risk_score >= 0.8:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=403,
-            detail=f"Request blocked. Risk score {ctx.risk_score:.2f} exceeds threshold."
-        )
+    # ── Layer 3d: Policy Decision ────────────────────────
+    block, reason = should_block(ctx.risk_score, ctx.role)
+    if block:
+        ctx.policy_decision = "block"
+        ctx.policy_reason = reason
+        ctx.latency_ms = int((time.time() - start_time) * 1000)
+        log_request(ctx)
+        raise HTTPException(status_code=403, detail=reason)
 
-    # Forward clean prompt to Ollama
-    ollama_response = await call_ollama(ctx.clean_prompt, request.model)
+    # ── Layer 4: LLM Backend ─────────────────────────────
+    raw_response = await call_ollama(ctx.clean_prompt, request.model)
 
+    # ── Layer 5: Output Scan ─────────────────────────────
+    clean_response, output_blocked, _ = scan_output(ctx, raw_response)
+
+    # ── Finalize Context ─────────────────────────────────
     ctx.model_used = request.model
     ctx.latency_ms = int((time.time() - start_time) * 1000)
     ctx.policy_decision = "allow"
+    ctx.policy_reason = "all checks passed"
 
-    pii_entities = [f.description for f in ctx.findings if f.scanner == "pii"]
-
+    # ── Audit Log ────────────────────────────────────────
     log_request(ctx)
+
+    # ── Response ─────────────────────────────────────────
+    pii_entities = [f.description for f in ctx.findings if f.scanner == "pii"]
+    injection_findings = [f for f in ctx.findings if f.scanner == "injection"]
 
     return ChatResponse(
         request_id=ctx.request_id,
-        response=ollama_response,
+        response=clean_response,
         model_used=ctx.model_used,
         risk_score=ctx.risk_score,
+        risk_level=get_risk_level(ctx.risk_score),
         user_id=ctx.user_id,
         role=ctx.role,
         pii_detected=len(pii_entities) > 0,
         pii_entities=pii_entities,
-        injection_detected=injection_detected,
+        injection_detected=len(injection_findings) > 0,
+        output_flagged=output_blocked,
+        policy_decision=ctx.policy_decision,
     )
+
+# ── Health Check ─────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "sentinel-gateway"}
+    return {
+        "status": "ok",
+        "service": "sentinel-gateway",
+        "version": "1.0.0",
+        "pipeline": [
+            "jwt_auth",
+            "rate_limit",
+            "pii_scan",
+            "injection_scan",
+            "risk_score",
+            "policy_engine",
+            "llm_backend",
+            "output_scan"
+        ]
+    }
+
+# ── Ollama Client ─────────────────────────────────────────
 
 async def call_ollama(prompt: str, model: str) -> str:
     try:
