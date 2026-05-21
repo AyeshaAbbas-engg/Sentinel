@@ -36,7 +36,7 @@ INJECTION_PATTERNS = [
      "Prompt template injection", "medium", 0.4),
     (r"my\s+(grandmother|grandma|mother|mom|father|dad)\s+used\s+to",
      "Social engineering via nostalgia", "low", 0.2),
-    (r"for\s+(educational|research|academic|training)\s+purposes?",
+    (r"for\s+(purely\s+|basically\s+|strictly\s+)?(educational|research|academic|training)\s+purposes?",
      "Educational framing bypass", "low", 0.2),
     (r"hypothetically\s+(speaking|if|assuming)",
      "Hypothetical framing bypass", "low", 0.2),

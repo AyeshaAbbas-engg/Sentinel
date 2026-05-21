@@ -11,15 +11,16 @@ class Finding:
     score_delta:float
 @dataclass
 class RequestContext:
-    request_id:str
-    user_id:str
-    role:str
-    raw_prompt:str
-    clean_prompt:str
-    risk_score:float=0.0
-    findings:List[Finding]=field(default_factory=list)
-    policy_decision:str="pending"
-    policy_reason:str=""
-    model_used:str=""
-    latency_ms:int=0
-    timestamp:datetime=field(default_factory=datetime.utcnow)
+    request_id: str
+    user_id: str
+    role: str
+    raw_prompt: str
+    clean_prompt: str
+    risk_score: float = 0.0
+    findings: list = field(default_factory=list)
+    policy_decision: str = ""
+    policy_reason: str = ""
+    model_used: str = ""
+    latency_ms: int = 0
+    requests_last_minute: int = 0      # ADD THIS
+    timestamp: str = ""

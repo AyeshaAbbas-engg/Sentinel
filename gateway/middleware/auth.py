@@ -21,6 +21,6 @@ async def verify_jwt(request:Request)-> dict :
     role=payload.get("role")
     if not user_id or not role:
         raise HTTPException(status_code=401, detail="Token missing required claims")
-    if role not in ["admin","user","guest"]:
+    if role not in ["admin","analyst","guest"]:
         raise HTTPException(status_code=403, detail="Unknown role : {role}")
     return {"user_id":user_id,"role":role}    

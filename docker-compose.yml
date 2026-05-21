@@ -8,11 +8,14 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - JWT_SECRET=${JWT_SECRET}
       - PRESIDIO_URL=http://presidio:8001
+      - OPA_URL=http://opa:8181
     depends_on:
       - ollama
       - presidio
+      - opa
     volumes:
       - ./gateway:/app
+
   presidio:
     build: ./presidio
     ports:
@@ -25,5 +28,35 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  opa:
+    image: openpolicyagent/opa:latest
+    command: run --server --addr :8181 /policies
+    volumes:
+      - ./opa/policies:/policies
+    ports:
+      - '8181:8181'
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - '9090:9090'
+    depends_on:
+      - gateway
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - '3000:3000'
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=sentinel
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   ollama_data:
+  grafana_data:
