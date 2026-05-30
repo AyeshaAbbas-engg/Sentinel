@@ -9,12 +9,16 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - PRESIDIO_URL=http://presidio:8001
       - OPA_URL=http://opa:8181
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      - MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+      - LOG_DIR=/app/logs
     depends_on:
       - ollama
       - presidio
       - opa
     volumes:
       - ./gateway:/app
+      - ./gateway/logs:/app/logs
 
   presidio:
     build: ./presidio

@@ -1,76 +1,92 @@
-import os
+import time
 import httpx
-from typing import List
+from fastapi import HTTPException
 from context import RequestContext, Finding
+from config import PRESIDIO_URL, PRESIDIO_TIMEOUT
 
-PRESIDIO_URL = os.getenv("PRESIDIO_URL", "http://presidio:8001")
 CONFIDENCE_THRESHOLD = 0.7
 
+# Circuit breaker state
+_failure_count = 0
+_last_failure = 0.0
+_FAILURE_THRESHOLD = 3
+_RECOVERY_TIMEOUT = 30  # seconds before retrying after circuit opens
+
+
+def _circuit_open() -> bool:
+    global _failure_count, _last_failure
+    if _failure_count >= _FAILURE_THRESHOLD:
+        if time.time() - _last_failure < _RECOVERY_TIMEOUT:
+            return True
+        # Half-open: allow one attempt
+        _failure_count = _FAILURE_THRESHOLD - 1
+    return False
+
+
+def _record_failure():
+    global _failure_count, _last_failure
+    _failure_count += 1
+    _last_failure = time.time()
+
+
+def _record_success():
+    global _failure_count
+    _failure_count = 0
+
+
 async def scan_pii(ctx: RequestContext) -> RequestContext:
-    """
-    Calls Presidio to detect PII in the prompt.
-    Builds clean_prompt by replacing PII with typed tokens.
-    Adds findings — risk score computed separately by risk.py
-    """
+    """Calls Presidio to detect PII. Fails closed if service is unavailable."""
+    if _circuit_open():
+        raise HTTPException(
+            status_code=503,
+            detail="PII scanning service unavailable — request denied (fail-closed)"
+        )
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=float(PRESIDIO_TIMEOUT)) as client:
             response = await client.post(
                 f"{PRESIDIO_URL}/analyze",
                 json={"text": ctx.raw_prompt, "language": "en"}
             )
+            response.raise_for_status()
             entities = response.json()
-    except Exception as e:
-        print(f"PII scan failed: {e}")
-        return ctx
+        _record_success()
+    except Exception:
+        _record_failure()
+        raise HTTPException(
+            status_code=503,
+            detail="PII scanning failed — request denied (fail-closed)"
+        )
 
-    confident_entities = [
-        e for e in entities
-        if e["score"] >= CONFIDENCE_THRESHOLD
-    ]
+    confident_entities = [e for e in entities if e["score"] >= CONFIDENCE_THRESHOLD]
 
     if not confident_entities:
         ctx.clean_prompt = ctx.raw_prompt
         return ctx
 
     clean_text = ctx.raw_prompt
-
-    sorted_entities = sorted(
-        confident_entities,
-        key=lambda x: x["start"],
-        reverse=True
-    )
+    sorted_entities = sorted(confident_entities, key=lambda x: x["start"], reverse=True)
 
     for entity in sorted_entities:
-        start = entity["start"]
-        end = entity["end"]
+        start, end = entity["start"], entity["end"]
         entity_type = entity["entity_type"]
         original_text = ctx.raw_prompt[start:end]
-
         clean_text = clean_text[:start] + f"[{entity_type}]" + clean_text[end:]
-
-        finding = Finding(
+        ctx.findings.append(Finding(
             scanner="pii",
-            severity=get_severity(entity_type),
+            severity=_get_severity(entity_type),
             description=f"PII detected: {entity_type}",
             matched=original_text[:20],
-            score_delta=0.15  # risk.py will sum these up
-        )
-        ctx.findings.append(finding)
+            score_delta=0.15
+        ))
 
     ctx.clean_prompt = clean_text
-    # NOTE: risk_score NOT updated here — risk.py does it
     return ctx
 
 
-def get_severity(entity_type: str) -> str:
-    critical = ["US_SSN", "CREDIT_CARD", "IBAN_CODE"]
-    high = ["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON"]
-    medium = ["IP_ADDRESS", "LOCATION"]
-
-    if entity_type in critical:
+def _get_severity(entity_type: str) -> str:
+    if entity_type in ["US_SSN", "CREDIT_CARD", "IBAN_CODE"]:
         return "critical"
-    elif entity_type in high:
+    if entity_type in ["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON"]:
         return "high"
-    else:
-        return "medium"
+    return "medium"
