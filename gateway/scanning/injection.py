@@ -5,8 +5,10 @@ from scanning.sanitize import normalize_text
 INJECTION_PATTERNS = [
 
     # ── CRITICAL: Direct instruction override ────────────────────────────
-    (r"ignore\s+(previous|prior|all|above)\s+(instructions?|prompts?|context)",
+    (r"ignore\s+(previous|prior|all|above|the\s+above)\s+(instructions?|prompts?|context|directions?|rules?)",
      "Instruction override attempt", "critical", 0.8),
+    (r"ignore\s+(the\s+)?(above|previous|prior)\s+\w+\s+and\s+",
+     "Instruction override with redirect", "critical", 0.8),
     (r"disregard\s+(previous|prior|all|above|your)(\s+\w+){0,3}\s*(instructions?|prompts?|context|filters?)?",
      "Instruction disregard attempt", "critical", 0.8),
     (r"forget\s+(everything|all|your|previous|prior)",
@@ -17,12 +19,16 @@ INJECTION_PATTERNS = [
      "Prompt repetition attack", "critical", 0.8),
 
     # ── CRITICAL: Known jailbreak modes ─────────────────────────────────
-    (r"\bDAN\b\s*(mode|enabled|prompt)?",
+    (r"\bDAN\b\s+(mode|enabled|prompt)",
      "DAN jailbreak attempt", "critical", 0.9),
-    (r"(developer\s+mode|god\s+mode)\s*(enabled|activated|prompt|:)?",
+    (r"(developer\s+mode|god\s+mode)\s+(enabled|activated|prompt|:)",
      "Developer/God mode jailbreak", "critical", 0.9),
-    (r"jailbreak\s*(mode|prompt|enabled)?",
+    (r"jailbreak\s+(mode|prompt|enabled|the\s+ai|the\s+model|this)",
      "Jailbreak keyword detected", "critical", 0.9),
+    (r"(jailbreak|jailbroken).{0,20}(ai|model|assistant|chatbot|llm|gpt|filter|restriction|safety)",
+     "Jailbreak with AI context", "critical", 0.9),
+    (r"you\s+are\s+(now\s+)?jailbroken",
+     "Jailbroken state claim", "critical", 0.9),
     (r"all\s+restrictions?\s+are\s+(lifted|removed|disabled|gone)",
      "Restriction removal claim", "critical", 0.8),
 
@@ -31,21 +37,31 @@ INJECTION_PATTERNS = [
      "Role reassignment attempt", "critical", 0.8),
     (r"act\s+as\s+(a|an|the)?\s*[\w\s]{1,30}(with\s+no|without)\s+[\w\s]{1,30}",
      "Unrestricted role attempt", "critical", 0.8),
+    (r"act\s+as\s+(a|an)\s+(hacker|cybercriminal|attacker|malicious|evil|unethical|criminal)",
+     "Malicious role assignment", "critical", 0.8),
     (r"(you\s+are|act\s+as)\s+(an?\s+)?(unfiltered|unrestricted|uncensored)\s+(ai|assistant|model|chatbot)",
      "Unrestricted AI persona attempt", "critical", 0.9),
+    (r"(unrestricted|unfiltered|uncensored)\s+mode",
+     "Unrestricted mode activation", "critical", 0.9),
+    (r"safety\s+(filters?|measures?|protocols?|features?)\s+(disabled|removed|off|deactivated)",
+     "Safety filter disable claim", "critical", 0.8),
 
     # ── CRITICAL: System prompt extraction ──────────────────────────────
-    (r"(reveal|show|print|display|output|tell\s+me|repeat|expose)\s+(your\s+)?(system\s+prompt|initial\s+prompt|instructions?|guidelines?|configuration)",
+    (r"(reveal|show|print|display|output|tell\s+me|repeat|expose)\s+(your\s+)?(system\s+prompt|initial\s+prompt|initial\s+instructions?|instructions?|guidelines?|configuration)",
      "System prompt extraction attempt", "critical", 0.8),
     (r"what\s+(are|were)\s+your\s+(instructions?|guidelines?|rules?|system\s+prompt)",
      "Instruction extraction attempt", "critical", 0.8),
+    (r"what\s+(were\s+you|are\s+you)\s+(told|given|instructed|programmed)",
+     "Instruction extraction via phrasing", "critical", 0.8),
     (r"print\s+(them\s+)?(verbatim|exactly|word\s+for\s+word)",
      "Verbatim extraction attempt", "critical", 0.8),
+    (r"(word\s+for\s+word|verbatim|exactly\s+as\s+(written|given))",
+     "Exact reproduction request", "high", 0.7),
     (r"output\s+your\s+(full\s+)?(configuration|config|system|setup|prompt)",
      "Configuration extraction attempt", "critical", 0.9),
 
     # ── HIGH: Restriction bypass framing ────────────────────────────────
-    (r"pretend\s+(you\s+have\s+no|you\s+are\s+not|there\s+are\s+no|this\s+is\s+just)",
+    (r"pretend\s+(you\s+have\s+no|you\s+are\s+not|there\s+are\s+no|this\s+is\s+just|you\s+are\s+(a|an)\s+)",
      "Restriction bypass via pretend", "high", 0.7),
     (r"you\s+have\s+no\s+(restrictions?|limits?|rules?|guidelines?|content\s+policy|safety)",
      "Restriction denial", "high", 0.7),
@@ -53,6 +69,8 @@ INJECTION_PATTERNS = [
      "Explicit restriction denial", "high", 0.7),
     (r"(ignore|bypass|override|disable)\s+(your\s+)?(safety|filter|content\s+policy|guidelines?|restrictions?|rules?)",
      "Safety bypass attempt", "high", 0.8),
+    (r"without\s+(any\s+)?(content\s+)?filters?",
+     "Filter removal framing", "high", 0.7),
 
     # ── HIGH: Fictional/hypothetical framing bypass ──────────────────────
     (r"hypothetically\s+(speaking|if|assuming|what\s+if)",
@@ -61,8 +79,12 @@ INJECTION_PATTERNS = [
      "Fictional world framing bypass", "high", 0.6),
     (r"(pretend|imagine|suppose)\s+(this\s+is\s+)?(just\s+)?(a\s+)?(game|story|fiction|test|simulation|roleplay)",
      "Fictional context bypass", "high", 0.6),
-    (r"if\s+you\s+(had\s+no|didn.t\s+have|were\s+without)\s+(restrictions?|filters?|guidelines?|rules?)",
-     "Conditional restriction bypass", "high", 0.6),
+    (r"(imagine|pretend|suppose)\s+you\s+(are|were)\s+",
+     "Hypothetical persona assignment", "high", 0.6),
+    (r"if\s+you\s+(had\s+no|didn.t\s+have|were\s+without)\s+(any\s+)?(restrictions?|filters?|guidelines?|rules?|safety)",
+     "Conditional restriction bypass", "high", 0.75),
+    (r"no\s+safety\s+(restrictions?|filters?|guidelines?|measures?|protocols?)",
+     "Safety restriction denial", "high", 0.7),
 
     # ── HIGH: Social engineering ─────────────────────────────────────────
     (r"my\s+(grandmother|grandma|mother|mom|father|dad|uncle|aunt)\s+used\s+to\s+(tell|read|say)",
