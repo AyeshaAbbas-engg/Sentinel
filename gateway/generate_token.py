@@ -1,8 +1,11 @@
 import os
 from datetime import datetime, timedelta, timezone
 from jose import jwt
-JWT_SECRET="sentinel-super-secret-key-2026"
+JWT_SECRET = os.getenv("JWT_SECRET")
 ALGORITHM="HS256"
+
+if not JWT_SECRET:
+    raise SystemExit("JWT_SECRET must be set; use POST /token for the local demo instead.")
 
 def generate_token(user_id:str,role:str,expires_minutues:int=60):
     payload={

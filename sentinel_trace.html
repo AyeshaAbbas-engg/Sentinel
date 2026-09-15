@@ -197,7 +197,8 @@ let ROLE = 'admin';
 const LAYER_NAMES = [
   'JWT Authentication', 'Rate Limiting', 'Input Sanitization',
   'PII Scan (Presidio)', 'Injection Detection', 'Risk Score Aggregation',
-  'OPA Policy Engine', 'Model Routing', 'LLM Backend (Ollama)', 'Output Scan'
+  'Intent/Complexity Classifier', 'OPA Policy Engine', 'Model Routing',
+  'LLM Backend (Ollama)', 'Output Scan'
 ];
 
 function setPrompt(p) { document.getElementById('prompt').value = p; }
@@ -224,7 +225,7 @@ async function genToken() {
 function buildPipeline() {
   const el = document.getElementById('pipeline');
   el.innerHTML = '';
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < LAYER_NAMES.length; i++) {
     if (i > 0) el.innerHTML += `<div class="connector" id="conn-${i}"></div>`;
     el.innerHTML += `
       <div class="layer-card" id="layer-${i+1}">
@@ -293,7 +294,7 @@ async function runTrace() {
   updateRisk(0);
 
   // Show all layers as "waiting"
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= LAYER_NAMES.length; i++) {
     document.getElementById(`layer-${i}`).classList.add('active');
   }
   setLayerState(1, 'processing', 'Request sent to gateway — processing pipeline...', []);
@@ -330,7 +331,7 @@ async function runTrace() {
     }
     if (res.status === 504 || res.status === 503 || res.status === 502) {
       setLayerState(1, 'pass', 'JWT verified', []);
-      setLayerState(9, 'block', `LLM backend timeout/error (${res.status}). Model may be loading — try a blocked prompt first, then retry.`, []);
+      setLayerState(10, 'block', `LLM backend timeout/error (${res.status}). Model may be loading — try a blocked prompt first, then retry.`, []);
       document.getElementById('run-btn').disabled = false;
       document.getElementById('run-btn').textContent = '▶ TRACE';
       return;
@@ -344,7 +345,7 @@ async function runTrace() {
       const L = layers[i];
       // Show processing
       setLayerState(L.layer, 'processing', 'Scanning...', []);
-      await delay(400 + (L.layer === 9 ? 800 : 0)); // extra delay for LLM
+      await delay(400 + (L.layer === 10 ? 800 : 0)); // extra delay for LLM
 
       // Show result
       setLayerState(L.layer, L.status, L.detail, L.findings);
@@ -353,8 +354,8 @@ async function runTrace() {
     }
 
     // If blocked early, grey out remaining layers
-    if (data.final_decision === 'block' && layers.length < 10) {
-      for (let i = layers.length + 1; i <= 10; i++) {
+    if (data.final_decision === 'block' && layers.length < LAYER_NAMES.length) {
+      for (let i = layers.length + 1; i <= LAYER_NAMES.length; i++) {
         document.getElementById(`layer-${i}`).style.opacity = '0.15';
         document.getElementById(`detail-${i}`).textContent = '— skipped (request blocked) —';
       }

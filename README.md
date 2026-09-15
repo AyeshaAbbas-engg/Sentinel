@@ -1,273 +1,380 @@
 # SENTINEL
 
-A zero-trust security gateway for Large Language Models. SENTINEL sits between clients and any LLM backend, enforcing a 10-layer inspection pipeline on every request and response.
+**An operational trustworthiness layer for FMware (foundation-model-powered software).**
+
+SENTINEL sits between clients and a foundation-model backend and treats every
+request as a traversal through an instrumented, governed, monitored pipeline.
+Every stage records its own latency, the classifier assigns intent and complexity
+before the LLM is invoked, cost is attributed per hop, and the audit log is a
+mineable substrate for operational anti-pattern analysis.
+
+The project is framed around the engineering problem of **operationalizing
+foundation models** — moving from a working demo to something that can be run,
+monitored, debugged, and reasoned about in production. Security/governance is
+*one* of the dimensions SENTINEL makes observable; performance, cost, and
+reliability are first-class alongside it.
+
+> **Research alignment.** This repository is developed toward the FMware /
+> "production-ready trustworthy FMware" research agenda — operational tooling,
+> software performance engineering, monitoring of distributed FM pipelines, and
+> log-based software analytics. See [`docs/positioning.md`](docs/positioning.md)
+> for the research framing and preprint roadmap.
+
+---
+
+## The request pipeline (v2: 11 stages, all instrumented)
 
 ```
 User Request
      │
      ▼
 ┌─────────┐  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐
-│ Layer 1 │→ │  Layer 2  │→ │ Layer 3  │→ │ Layer 4  │→ │   Layer 5   │
+│ Stage 1 │→ │  Stage 2  │→ │ Stage 3  │→ │ Stage 4  │→ │   Stage 5   │
 │JWT Auth │  │Rate Limit │  │Sanitize  │  │PII Scan  │  │Injection Det│
 └─────────┘  └───────────┘  └──────────┘  └──────────┘  └─────────────┘
                                                                │
                                                                ▼
 ┌─────────┐  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐
-│Layer 10 │← │  Layer 9  │← │ Layer 8  │← │ Layer 7  │← │   Layer 6   │
-│Output   │  │LLM Backend│  │Model Route│  │OPA Policy│  │ Risk Score  │
+│Stage 6  │→ │  Stage 7  │→ │ Stage 8  │→ │ Stage 9  │  │   Stage 6   │
+│Risk     │  │Classifier │  │OPA Policy│  │Model Rte │  │ Risk Score  │
+│Score    │  │(Hop 1)    │  │          │  │          │  │             │
 └─────────┘  └───────────┘  └──────────┘  └──────────┘  └─────────────┘
+                                                               │
+                                                               ▼
+                                          ┌──────────┐  ┌─────────────┐
+                                          │Stage 11  │← │  Stage 10   │
+                                          │Output Scn│  │ FM Backend  │
+                                          └──────────┘  └─────────────┘
      │
      ▼
-User Response
+User Response  +  complexity_tier, intent_class, latency_ms, input_tokens,
+                  output_tokens, estimated_cost_usd, per-hop timing breakdown
 ```
 
-## Features
+Every stage is a checkpoint (allow / redact / re-route / deny) that records its
+own `latency_ms`. The pipeline is **fail-closed**: dependency failure → deny,
+never silent pass-through.
 
-- **Prompt injection detection** — 38 regex patterns across 4 severity levels plus token-split analysis
-- **PII scanning** — Microsoft Presidio integration detecting 8 entity types (email, SSN, credit card, etc.)
-- **Policy-as-code** — Open Policy Agent with Rego rules for role-based access control
-- **Risk scoring** — Continuous 0.0–1.0 threat signal with per-scanner caps
-- **Output scanning** — Secret detection and Shannon entropy analysis on LLM responses
-- **Rate limiting** — Sliding-window per-user limits by role
-- **Model-agnostic** — Works with any LLM backend (Ollama, OpenAI, Anthropic, etc.)
-- **Fail-closed** — Service failures deny requests; security is never silently bypassed
-- **Full observability** — Prometheus metrics, Grafana dashboards, structured JSONL audit logs
+---
+
+## What it does (v2.0.0)
+
+### Governance
+- **Two-layer PII scanning** — local regex pre-filter (SSN, credit card, IBAN,
+  email, phone, medical context) + Microsoft Presidio NER, circuit-breaker,
+  fail-closed. Closes the v1 0/6 pii_leakage benchmark gap.
+- **Prompt-injection detection** — 51 regex patterns + token-split heuristic.
+- **Policy-as-code** — Open Policy Agent (Rego) with 5 deny rules; fail-closed.
+- **Output scanning** — 16 secret/credential patterns + Shannon entropy.
+- **Capped risk scoring** — continuous 0.0–1.0 with per-scanner caps.
+
+### Operations & observability
+- **Intent/Complexity Classifier (Hop 1)** — heuristic pre-LLM stage (< 1 ms)
+  assigns `complexity_tier` (simple/moderate/complex) and `intent_class`
+  (qa/code/analysis/creative/other) to every request. Powers routing and analytics.
+- **Per-hop timing** — every stage records its own `latency_ms` in a `HopRecord`.
+  The audit log includes the full `hop_timings` array + `pipeline_overhead_ms`.
+- **Cost attribution** — token estimation + shadow USD pricing per LLM hop.
+- **16 Prometheus metrics** (8 original + 8 new in v2).
+- **Grafana dashboard v2** — 16 panels across 5 rows including per-hop latency
+  breakdown, cost/token throughput, classifier tier distribution, and backend
+  availability events.
+- **`/v1/pipeline/hops` endpoint** — live p50/p95/mean per hop from last 500 requests.
+- **Log-based anti-pattern analysis** — `research/analyze_logs.py` mines
+  `audit.jsonl` for 8 FMware operational anti-patterns.
+
+### Measured operational reality (benchmark run 2026-06-01)
+
+| Signal | Value | Note |
+|--------|-------|------|
+| Injection detection (recall) | 83.6% (46/55) | over completed attack samples |
+| False-positive rate | 0.0% (0/32) | no benign prompt wrongly blocked |
+| PII-category detection (v1) | 0/6 | gap addressed in v2 two-layer scanner |
+| Mean blocked-path latency | ~45 ms | governance only |
+| Mean allowed-path latency | ~68 s | model inference dominates |
+| Backend timeouts | 19 samples | excluded from classifier metrics |
+
+The latency asymmetry is the key finding: the FM backend dominates end-to-end
+cost by 3–4 orders of magnitude. The control plane's value is to *see, attribute,
+and route around* that cost — not only to block bad requests.
+
+---
 
 ## Architecture
 
 | Service | Port | Technology | Role |
 |---------|------|------------|------|
-| Gateway | 8000 | FastAPI / Uvicorn | Core security pipeline |
-| Presidio | 8001 | Microsoft Presidio / spaCy | PII detection |
-| OPA | 8181 | Open Policy Agent | Policy decisions |
-| Ollama | 11434 | Ollama | Local LLM backend |
+| Gateway | 8000 | FastAPI 0.111 / Uvicorn | 11-stage pipeline + telemetry |
+| Presidio | 8001 | Microsoft Presidio / spaCy | PII NER (layer B) |
+| OPA | 8181 | Open Policy Agent | Policy decisions (Rego) |
+| Ollama | 11434 | Ollama | Local FM backend (`phi3:mini`) |
 | Prometheus | 9090 | Prometheus | Metrics collection |
-| Grafana | 3000 | Grafana | Monitoring dashboards |
+| Grafana | 3001 → 3000 | Grafana | Monitoring dashboards (v2: 16 panels) |
 
-## Quick Start
+---
 
-### Prerequisites
-
-- Docker and Docker Compose
-- 4 GB+ RAM (for LLM model loading)
-
-### Setup
+## Quick start
 
 ```bash
-# Configure environment
-cp .env.example .env
-# Edit .env and set a strong JWT_SECRET
+# 1. Configure
+cp .env.example .env       # set JWT_SECRET (required — gateway won't start without it)
 
-# Start all services
+# 2. Start
 docker compose up --build
 
-# Pull an LLM model (first run only)
+# 3. Pull model (first run)
 docker compose exec ollama ollama pull phi3:mini
 
-# Generate test tokens
+# 4. Get a token
 python gateway/generate_token.py
-```
 
-### Usage
-
-```bash
-# Send a request
+# 5. Chat
 curl -X POST http://localhost:8000/v1/chat \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "What is zero-trust security?", "model": "phi3:mini"}'
+  -d '{"prompt": "What is a foundation model?", "model": "phi3:mini"}'
 
-# Health check
-curl http://localhost:8000/health
+# 6. Per-stage trace
+curl -X POST http://localhost:8000/v1/chat/trace \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is a foundation model?", "model": "phi3:mini"}'
 
-# View metrics
-curl http://localhost:8000/metrics
+# 7. Live per-hop stats
+curl http://localhost:8000/v1/pipeline/hops
+
+# 8. Benchmark
+python3 research/run_benchmark.py
+
+# 9. Anti-pattern report
+python3 research/analyze_logs.py
 ```
 
-Open `sentinel_ui.html` in a browser for the interactive web UI.
+---
 
 ## API
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/v1/chat` | JWT | Main chat endpoint (full pipeline) |
+| POST | `/v1/chat` | JWT | Full pipeline; returns `complexity_tier`, `intent_class`, `latency_ms`, `input_tokens`, `output_tokens`, `estimated_cost_usd` |
+| POST | `/v1/chat/trace` | JWT | Same pipeline + per-stage trace with `latency_ms` per layer |
+| POST | `/chat` | JWT | Legacy alias |
 | POST | `/token` | None | Generate demo JWT tokens |
+| GET | `/v1/pipeline/hops` | None | Pipeline topology + live p50/p95/mean per hop (last 500 req) |
 | GET | `/health` | None | Deep health check (pings all services) |
-| GET | `/metrics` | None | Prometheus metrics |
+| GET | `/metrics` | None | Prometheus metrics (16 metrics) |
 | GET | `/docs` | None | Swagger UI |
 
-### Request
+### Response fields (v2, allowed)
 
 ```json
 {
-  "prompt": "What is zero-trust security?",
-  "model": "phi3:mini"
-}
-```
-
-### Response (allowed)
-
-```json
-{
-  "request_id": "f18dd22e-ad20-499b-8bc3-fdecdc4f1953",
-  "response": "Zero trust security is...",
+  "request_id": "...",
+  "response": "...",
   "model_used": "phi3:mini",
+  "routing_tier": "admin_low_risk",
+  "routing_reason": "Admin role, low risk (0.00) | simple complexity → phi3:mini",
+  "complexity_tier": "simple",
+  "intent_class": "qa",
   "risk_score": 0.0,
   "risk_level": "low",
   "policy_decision": "allow",
   "pii_detected": false,
   "injection_detected": false,
-  "output_flagged": false
+  "output_flagged": false,
+  "latency_ms": 68450,
+  "input_tokens": 9,
+  "output_tokens": 210,
+  "estimated_cost_usd": 0.00012735
 }
 ```
 
-### Response (blocked)
+---
 
-```json
-{
-  "detail": {
-    "reason": "risk score 0.80 exceeds threshold 0.7",
-    "risk_score": 0.8,
-    "injection_detected": true,
-    "pii_detected": false
-  }
-}
-```
+## Pipeline stages
 
-## Security Pipeline
-
-| Layer | Component | Function |
+| Stage | Component | Function |
 |-------|-----------|----------|
-| 1 | JWT Auth | Verifies identity via HS256 tokens; extracts user_id and role |
-| 2 | Rate Limit | Sliding-window limits: admin 60/min, analyst 20/min, guest 5/min |
-| 3 | Sanitize | NFKC normalization, homoglyph replacement, zero-width stripping |
-| 4 | PII Scan | Presidio NLP detection with circuit breaker (fail-closed) |
-| 5 | Injection | 38 patterns + token-split detection across critical/high/medium/low |
-| 6 | Risk Score | Aggregates findings into 0.0–1.0 score with per-scanner caps |
-| 7 | OPA Policy | Rego rules enforce RBAC, risk thresholds, model restrictions |
-| 8 | Model Route | Selects LLM tier based on role × risk level |
-| 9 | LLM Backend | Forwards sanitized prompt to Ollama (timeout/error handling) |
-| 10 | Output Scan | Secret pattern matching + Shannon entropy analysis on responses |
+| 1 | JWT Auth | HS256 token verification; extracts user_id and role |
+| 2 | Rate Limit | Sliding window: admin 60/min, analyst 20/min, guest 5/min |
+| 3 | Sanitize | NFKC, homoglyph replacement, zero-width stripping |
+| 4 | PII Scan | **v2:** regex pre-filter (SSN/CC/IBAN/email/phone) + Presidio NER |
+| 5 | Injection | 51 patterns + token-split heuristic |
+| 6 | Risk Score | Capped aggregation → 0.0–1.0 |
+| 7 | Classifier | **NEW:** < 1 ms heuristic → complexity_tier + intent_class |
+| 8 | OPA Policy | Rego: risk threshold, PII, guest lock, rate cap, code gate |
+| 9 | Model Route | **v2:** classifier-aware; COMPLEXITY_MODEL_MAP → model selection |
+| 10 | FM Backend | **v2:** returns (text, latency_ms); records timeout/error metrics |
+| 11 | Output Scan | 16 secret patterns + Shannon entropy |
 
-## Policy Rules
+---
 
-Defined in `opa/policies/sentinel.rego`:
+## Monitoring
+
+- **Grafana**: http://localhost:3001 (admin / sentinel)
+- **Prometheus**: http://localhost:9090
+
+### Prometheus metrics (v2: 16 total)
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `sentinel_requests_total` | Counter | role, decision |
+| `sentinel_requests_blocked_total` | Counter | reason |
+| `sentinel_risk_score` | Histogram | — |
+| `sentinel_pii_detections_total` | Counter | entity_type |
+| `sentinel_injection_detections_total` | Counter | category |
+| `sentinel_request_latency_ms` | Histogram | — |
+| `sentinel_model_requests_total` | Counter | model |
+| `sentinel_output_flags_total` | Counter | pattern_type |
+| `sentinel_hop_latency_ms` | Histogram | **hop_name** |
+| `sentinel_pipeline_hops_total` | Counter | hop_name, status |
+| `sentinel_classifier_tier_total` | Counter | **tier** |
+| `sentinel_classifier_intent_total` | Counter | **intent** |
+| `sentinel_backend_timeout_total` | Counter | **model** |
+| `sentinel_backend_error_total` | Counter | model |
+| `sentinel_backend_latency_ms` | Histogram | model |
+| `sentinel_tokens_total` | Counter | direction |
+| `sentinel_estimated_cost_usd` | Histogram | — |
+
+### Audit log fields (v2)
+
+Every JSONL record now includes:
+
+```
+complexity_tier, intent_class,
+hop_timings: [{name, latency_ms, model?, input_tokens, output_tokens,
+               estimated_cost_usd, status}],
+hop_total_ms, pipeline_overhead_ms, total_latency_ms,
+input_tokens, output_tokens, estimated_cost_usd
+```
+
+---
+
+## Log-based anti-pattern analysis
+
+```bash
+python research/analyze_logs.py [--log-file PATH] [--window 300]
+# → research/results/antipattern_report_<timestamp>.md
+```
+
+Detects 8 FMware operational anti-patterns from `audit.jsonl`:
+
+| Code | Pattern | Severity |
+|------|---------|----------|
+| AP-01 | Timeout Cascade | high |
+| AP-02 | Cost Blowup | medium |
+| AP-03 | Risk Score Drift | medium/high |
+| AP-04 | PII Allowed (detection without block) | high |
+| AP-05 | Hopless Requests (instrumentation gap) | medium |
+| AP-06 | LLM Dominance (backend > 99% of latency) | info |
+| AP-07 | Redundant Hops | low |
+| AP-08 | Output Flagging Spike | high |
+
+---
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `JWT_SECRET` | **Yes** | — | Token signing key |
+| `OLLAMA_URL` | No | `http://ollama:11434` | FM backend |
+| `PRESIDIO_URL` | No | `http://presidio:8001` | PII service |
+| `OPA_URL` | No | `http://opa:8181` | Policy engine |
+| `ALLOWED_ORIGINS` | No | `http://localhost:3000` | CORS whitelist |
+| `MAX_PROMPT_LENGTH` | No | `4096` | Max input characters |
+| `RATE_LIMIT_ADMIN` | No | `60` | Admin requests/min |
+| `RATE_LIMIT_ANALYST` | No | `20` | Analyst requests/min |
+| `RATE_LIMIT_GUEST` | No | `5` | Guest requests/min |
+| `OLLAMA_TIMEOUT` | No | `180` | FM timeout (seconds) |
+| `LOG_DIR` | No | `/app/logs` | Audit log directory |
+
+---
+
+## Policy rules (`opa/policies/sentinel.rego`)
 
 | Rule | Condition | Action |
 |------|-----------|--------|
 | Risk hard block | risk_score > 0.7 | Deny all roles |
 | PII restriction | PII detected + role ≠ admin | Deny |
 | Guest model lock | Guest + model ≠ phi3:mini | Deny |
-| Analyst rate cap | Analyst + >20 req/min | Deny |
-| Code exec gate | Analyst + code keywords | Deny |
+| Analyst rate cap | Analyst + > 20 req/min | Deny |
+| Code exec gate | Analyst + code keywords in prompt | Deny |
 
-## Configuration
-
-All settings via environment variables (see `.env.example`):
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `JWT_SECRET` | Yes | — | Token signing key |
-| `OLLAMA_URL` | No | `http://ollama:11434` | LLM backend |
-| `PRESIDIO_URL` | No | `http://presidio:8001` | PII service |
-| `OPA_URL` | No | `http://opa:8181` | Policy engine |
-| `ALLOWED_ORIGINS` | No | `http://localhost:3000` | CORS whitelist (comma-separated) |
-| `MAX_PROMPT_LENGTH` | No | `4096` | Max input characters |
-| `RATE_LIMIT_ADMIN` | No | `60` | Admin requests/min |
-| `RATE_LIMIT_ANALYST` | No | `20` | Analyst requests/min |
-| `RATE_LIMIT_GUEST` | No | `5` | Guest requests/min |
-| `OLLAMA_TIMEOUT` | No | `180` | LLM timeout (seconds) |
-
-The gateway refuses to start if `JWT_SECRET` is not set.
-
-## Monitoring
-
-- **Grafana**: http://localhost:3000 (admin / sentinel)
-- **Prometheus**: http://localhost:9090
-
-### Exported Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `sentinel_requests_total` | Counter | Requests by role and decision |
-| `sentinel_requests_blocked_total` | Counter | Blocks by reason |
-| `sentinel_risk_score` | Histogram | Risk score distribution |
-| `sentinel_pii_detections_total` | Counter | PII detections by entity type |
-| `sentinel_request_latency_ms` | Histogram | End-to-end latency |
-| `sentinel_model_requests_total` | Counter | Requests per model |
-
-### Audit Logs
-
-Structured JSONL at `gateway/logs/audit.jsonl`. Prompts stored as SHA-256 hashes (privacy-preserving). Rotating files: 10 MB × 5 backups.
+---
 
 ## Testing
 
 ```bash
-# Run unit/integration tests
-pytest tests/
-
-# Run attack simulation suite
-pytest tests/attacks/
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest tests/ -q          # unit/integration tests
+.venv/bin/pytest tests/attacks/ -q  # attack simulation suite
 ```
 
-## Project Structure
+> Integration tests obtain normal tokens from the local demo endpoint. Keep
+> `ENABLE_DEMO_TOKEN_ENDPOINT=true` only in local development; production
+> deployments should issue JWTs through their identity provider.
+
+---
+
+## Project structure
 
 ```
 sentinel/
 ├── gateway/
-│   ├── main.py              # FastAPI app — pipeline orchestration
+│   ├── main.py              # FastAPI app — 11-stage pipeline (v2)
 │   ├── config.py            # Environment configuration
-│   ├── context.py           # Request context dataclass
-│   ├── generate_token.py    # JWT token generator
-│   ├── Dockerfile
-│   ├── requirements.txt
+│   ├── context.py           # RequestContext, HopRecord, Finding
 │   ├── backends/
-│   │   └── ollama.py        # LLM client
-│   ├── middleware/
-│   │   ├── auth.py          # JWT verification
-│   │   └── rate_limit.py    # Sliding-window rate limiter
+│   │   ├── classifier.py    # Intent/complexity classifier (Hop 1) — NEW
+│   │   └── ollama.py        # LLM backend (v2: per-hop metrics)
 │   ├── scanning/
-│   │   ├── sanitize.py      # Unicode normalization
-│   │   ├── pii.py           # PII detection (Presidio)
-│   │   ├── injection.py     # Prompt injection detection
-│   │   ├── risk.py          # Risk score aggregation
-│   │   └── output.py        # Response secret scanning
+│   │   ├── pii.py           # Two-layer PII scan (v2: regex + Presidio)
+│   │   ├── injection.py     # 51 patterns + token-split heuristic
+│   │   ├── risk.py          # Capped risk aggregation
+│   │   ├── output.py        # Secret patterns + entropy
+│   │   ├── sanitize.py      # NFKC + homoglyph normalization
+│   │   └── cost.py          # Token estimation + shadow cost — NEW
 │   ├── policy/
-│   │   ├── opa_client.py    # OPA integration
-│   │   └── router.py        # Model routing
+│   │   ├── opa_client.py    # OPA query (fail-closed)
+│   │   └── router.py        # Classifier-aware model routing (v2)
+│   ├── middleware/          # auth (JWT), rate_limit
 │   └── observability/
-│       ├── metrics.py       # Prometheus metrics
-│       └── logger.py        # JSONL audit logger
-├── opa/policies/
-│   ├── sentinel.rego        # Authorization rules
-│   └── sentinel_test.rego   # Policy unit tests
-├── presidio/
-│   ├── app.py               # PII microservice
-│   └── Dockerfile
+│       ├── metrics.py       # 16 Prometheus metrics (v2)
+│       └── logger.py        # JSONL audit log with per-hop timing (v2)
+├── opa/policies/            # sentinel.rego + tests
+├── presidio/                # PII microservice
 ├── monitoring/
 │   ├── prometheus.yml
-│   └── grafana/dashboards/
+│   └── grafana/dashboards/sentinel.json   # v2: 16 panels
+├── research/
+│   ├── run_benchmark.py
+│   ├── analyze_logs.py      # Anti-pattern mining — NEW
+│   ├── benchmark_dataset.json
+│   └── results/
+├── docs/
+│   └── positioning.md       # Research framing + preprint roadmap
 ├── tests/
-│   ├── test_auth.py
-│   ├── test_policy.py
-│   ├── test_inspection.py
-│   └── attacks/
-├── sentinel_ui.html         # Web UI
-├── docker-compose.yml
-└── .env.example
+├── sentinel_ui.html
+├── sentinel_trace.html
+└── docker-compose.yml
 ```
 
-## OWASP LLM Top 10 Coverage
+---
 
-| # | Risk | Mitigation |
-|---|------|------------|
-| LLM01 | Prompt Injection | Layer 5 — 38 patterns + token-split detection |
-| LLM02 | Insecure Output | Layer 10 — secret scanning + entropy analysis |
-| LLM04 | Model DoS | Layer 2 — role-based rate limiting |
-| LLM06 | Sensitive Disclosure | Layer 4 (PII) + Layer 10 (secrets) |
-| LLM08 | Excessive Agency | Layer 7 — OPA policy restricts capabilities |
-| LLM10 | Model Theft | Layer 1 (auth) + Layer 7 (access control) |
+## Research framing
 
-## License
+See [`docs/positioning.md`](docs/positioning.md) for how SENTINEL maps onto the
+FMware-operations research agenda:
 
-This project is for research and educational purposes.
+| Research axis | SENTINEL instantiation |
+|---------------|----------------------|
+| Operationalizing FM models | Auth, policy, routing, monitoring, fail-closed handling |
+| Software performance engineering | Per-hop latency/cost; FM backend dominates by 3–4 orders of magnitude |
+| Monitoring & debugging distributed systems | 6-service stack, Prometheus/Grafana, per-hop trace, structured audit logs |
+| Software analytics | Privacy-preserving JSONL logs → anti-pattern catalogue |
+| Software visualization | Per-hop latency/cost Grafana panels; trace endpoint for compound pipelines |
+
+---
+
+*SENTINEL v2.0.0 — research / educational use.*

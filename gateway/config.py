@@ -16,9 +16,23 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 PRESIDIO_URL = os.getenv("PRESIDIO_URL", "http://presidio:8001")
 OPA_URL = os.getenv("OPA_URL", "http://opa:8181")
 
+# ── Models (multi-model routing) ─────────────────────────
+# CLASSIFIER_MODEL runs hop-1 (capped complexity classification).
+# CHEAP_MODEL serves simple/moderate prompts; STANDARD_MODEL is the
+# default generation model and the guest-pinned model.
+CLASSIFIER_MODEL      = os.getenv("CLASSIFIER_MODEL", "qwen2.5:1.5b")
+CHEAP_MODEL           = os.getenv("CHEAP_MODEL", "qwen2.5:1.5b")
+STANDARD_MODEL        = os.getenv("STANDARD_MODEL", "phi3:mini")
+CLASSIFIER_MAX_TOKENS = int(os.getenv("CLASSIFIER_MAX_TOKENS", "5"))
+CLASSIFIER_TIMEOUT    = int(os.getenv("CLASSIFIER_TIMEOUT", "20"))  # short → degrade fast
+
 # ── Security ─────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "4096"))
+# The token issuer exists solely to make the local demo and benchmark
+# self-contained.  A deployed gateway must receive tokens from its identity
+# provider, so keep this explicitly opt-in outside development.
+ENABLE_DEMO_TOKEN_ENDPOINT = os.getenv("ENABLE_DEMO_TOKEN_ENDPOINT", "false").lower() == "true"
 
 # ── Rate Limits ──────────────────────────────────────────
 RATE_LIMITS = {

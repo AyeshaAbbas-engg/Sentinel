@@ -4,110 +4,200 @@
   "annotations": { "list": [] },
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2 }
-        }
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "legend": { "displayMode": "list" } },
-      "targets": [
-        {
-          "expr": "rate(sentinel_requests_total[1m]) * 60",
-          "legendFormat": "{{role}} - {{decision}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Request Rate (per minute)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 5 },
-              { "color": "red", "value": 20 }
-            ]
-          },
-          "unit": "percent",
-          "max": 100,
-          "min": 0
-        }
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "id": 2,
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100, "title": "Traffic Overview", "type": "row" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 }, "id": 1,
+      "targets": [ { "expr": "rate(sentinel_requests_total[1m]) * 60",
+        "legendFormat": "{{role}} / {{decision}}", "refId": "A" } ],
+      "title": "Request Rate (per minute)", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [
+          { "color": "green", "value": 0 }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }
+        ] }, "unit": "percent", "max": 100, "min": 0 } },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 }, "id": 2,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "expr": "100 * sum(rate(sentinel_requests_blocked_total[5m])) / (sum(rate(sentinel_requests_total[5m])) + 0.001)",
+        "legendFormat": "Block %", "refId": "A" } ],
+      "title": "Block Rate % (5 min)", "type": "gauge" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [
+          { "color": "green", "value": 0 }, { "color": "yellow", "value": 3 }, { "color": "red", "value": 10 }
+        ] }, "unit": "short" } },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 }, "id": 3,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "expr": "sum(increase(sentinel_backend_timeout_total[5m]))",
+        "legendFormat": "Timeouts (5 min)", "refId": "A" } ],
+      "title": "Backend Timeouts (5 min)", "type": "stat" },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "id": 101, "title": "Per-Hop Latency Breakdown", "type": "row" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 }, "unit": "ms" } },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 10 }, "id": 10,
       "targets": [
-        {
-          "expr": "100 * sum(rate(sentinel_requests_blocked_total[5m])) / (sum(rate(sentinel_requests_total[5m])) + 0.001)",
-          "legendFormat": "Block Rate %",
-          "refId": "A"
-        }
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"rate_limit\"}[5m])) by (le))",
+          "legendFormat": "rate_limit p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"pii_scan\"}[5m])) by (le))",
+          "legendFormat": "pii_scan p50", "refId": "B" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"injection_scan\"}[5m])) by (le))",
+          "legendFormat": "injection_scan p50", "refId": "C" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"classifier\"}[5m])) by (le))",
+          "legendFormat": "classifier p50", "refId": "D" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"opa_policy\"}[5m])) by (le))",
+          "legendFormat": "opa_policy p50", "refId": "E" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"llm_backend\"}[5m])) by (le))",
+          "legendFormat": "llm_backend p50", "refId": "F" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"output_scan\"}[5m])) by (le))",
+          "legendFormat": "output_scan p50", "refId": "G" }
       ],
-      "title": "Block Rate % (last 5 min)",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" }
-        }
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "id": 3,
+      "title": "Per-Hop p50 Latency (ms) — All Hops", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 }, "id": 11,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"llm_backend\"}[5m])) by (le))",
+          "legendFormat": "llm_backend p95", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_hop_latency_ms_bucket{hop_name=\"llm_backend\"}[5m])) by (le))",
+          "legendFormat": "llm_backend p50", "refId": "B" },
+        { "expr": "histogram_quantile(0.95, sum(rate(sentinel_backend_latency_ms_bucket[5m])) by (le, model))",
+          "legendFormat": "backend p95 {{model}}", "refId": "C" }
+      ],
+      "title": "LLM Backend Latency p50/p95 (ms)", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 }, "id": 12,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(sentinel_request_latency_ms_bucket[5m])) by (le))",
+          "legendFormat": "end-to-end p95", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_request_latency_ms_bucket[5m])) by (le))",
+          "legendFormat": "end-to-end p50", "refId": "B" }
+      ],
+      "title": "End-to-End Request Latency p50/p95 (ms)", "type": "timeseries" },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "id": 102, "title": "Cost & Token Attribution", "type": "row" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 }, "unit": "currencyUSD" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 }, "id": 20,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(sentinel_estimated_cost_usd_bucket[5m])) by (le))",
+          "legendFormat": "cost p95 per req", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, sum(rate(sentinel_estimated_cost_usd_bucket[5m])) by (le))",
+          "legendFormat": "cost p50 per req", "refId": "B" }
+      ],
+      "title": "Estimated Cost per Request (USD) p50/p95", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 }, "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 }, "id": 21,
+      "targets": [
+        { "expr": "rate(sentinel_tokens_total{direction=\"input\"}[1m]) * 60",
+          "legendFormat": "input tokens/min", "refId": "A" },
+        { "expr": "rate(sentinel_tokens_total{direction=\"output\"}[1m]) * 60",
+          "legendFormat": "output tokens/min", "refId": "B" }
+      ],
+      "title": "Token Throughput (tokens / minute)", "type": "timeseries" },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "id": 103, "title": "Classifier & Routing Distribution", "type": "row" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 }, "id": 30,
+      "options": { "pieType": "donut", "legend": { "displayMode": "list" } },
+      "targets": [ { "expr": "sum(sentinel_classifier_tier_total) by (tier)",
+        "legendFormat": "{{tier}}", "refId": "A" } ],
+      "title": "Complexity Tier Distribution", "type": "piechart" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 }, "id": 31,
+      "options": { "pieType": "donut", "legend": { "displayMode": "list" } },
+      "targets": [ { "expr": "sum(sentinel_classifier_intent_total) by (intent)",
+        "legendFormat": "{{intent}}", "refId": "A" } ],
+      "title": "Intent Class Distribution", "type": "piechart" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 }, "id": 32,
+      "options": { "xField": "reason", "orientation": "horizontal" },
+      "targets": [ { "expr": "sort_desc(sentinel_requests_blocked_total)",
+        "legendFormat": "{{reason}}", "refId": "A" } ],
+      "title": "Top Block Reasons", "type": "barchart" },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 },
+      "id": 104, "title": "Security Signals", "type": "row" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 }, "id": 40,
       "options": { "bucketSize": "auto" },
+      "targets": [ { "expr": "sum(rate(sentinel_risk_score_bucket[5m])) by (le)",
+        "legendFormat": "{{le}}", "refId": "A" } ],
+      "title": "Risk Score Distribution", "type": "histogram" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 }, "id": 41,
       "targets": [
-        {
-          "expr": "sum(rate(sentinel_risk_score_bucket[5m])) by (le)",
-          "legendFormat": "{{le}}",
-          "refId": "A"
-        }
+        { "expr": "rate(sentinel_pii_detections_total[5m]) * 60",
+          "legendFormat": "PII {{entity_type}}", "refId": "A" },
+        { "expr": "rate(sentinel_injection_detections_total[5m]) * 60",
+          "legendFormat": "injection {{category}}", "refId": "B" }
       ],
-      "title": "Risk Score Distribution",
-      "type": "histogram"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" }
-        }
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "id": 4,
-      "options": {
-        "xField": "reason",
-        "orientation": "horizontal"
-      },
+      "title": "PII & Injection Detection Rate (/min)", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 }, "id": 42,
       "targets": [
-        {
-          "expr": "sort_desc(sentinel_requests_blocked_total)",
-          "legendFormat": "{{reason}}",
-          "refId": "A"
-        }
+        { "expr": "rate(sentinel_backend_timeout_total[5m]) * 60",
+          "legendFormat": "timeouts/min {{model}}", "refId": "A" },
+        { "expr": "rate(sentinel_backend_error_total[5m]) * 60",
+          "legendFormat": "errors/min {{model}}", "refId": "B" }
       ],
-      "title": "Top Block Reasons",
-      "type": "barchart"
-    }
+      "title": "Backend Availability Events (/min)", "type": "timeseries" },
+
+    { "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 54 }, "id": 43,
+      "targets": [
+        { "expr": "rate(sentinel_output_flags_total[5m]) * 60",
+          "legendFormat": "output flags/min {{pattern_type}}", "refId": "A" }
+      ],
+      "title": "Output Scan Flags (/min)", "type": "timeseries" }
+
   ],
   "refresh": "10s",
   "schemaVersion": 38,
-  "tags": ["sentinel", "security", "zero-trust"],
+  "tags": ["sentinel", "fmware", "llm-ops", "security"],
   "time": { "from": "now-1h", "to": "now" },
-  "title": "SENTINEL Gateway",
+  "title": "SENTINEL Gateway v2",
   "uid": "sentinel-dashboard",
-  "version": 1
+  "version": 2
 }

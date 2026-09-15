@@ -1,0 +1,216 @@
+
+SENTINEL — what this project actually is
+
+In one sentence: SENTINEL is a security/governance gateway that sits in front of a local LLM, but it has been deliberately re-framed as something more ambitious — an "operational trustworthiness layer" for FMware (foundation-model-powered software) — and built to serve as a research testbed toward an academic preprint and a MITACS application.
+
+That reframing is the single most important thing to understand about the repo. The same artifact could be pitched two ways:
+
+- Narrow pitch: "A zero-trust LLM firewall — it blocks prompt injection, redacts PII, enforces access policy."
+- The pitch the author actually chose: "A control plane that turns one opaque model call into an instrumented, governed, monitored request pipeline — where security is just one observable dimension alongside latency, cost, and reliability."
+
+Everything in the code — per-hop timing, shadow cost accounting, the audit-log anti-pattern miner, the "compound pipeline" language — exists to support the second framing.
+
+---
+The central finding the project is built around
+
+The most-repeated result across README, explain.md, and the benchmarks is a latency asymmetry:
+
+- Blocked request (governance only, never reaches the model): ~45–70 ms
+- Allowed request (includes model inference on CPU): ~68–92 seconds, up to a 180 s timeout
+
+So the entire governance/security stack — 10 of the 11 stages — costs milliseconds, while the FM backend dominates end-to-end cost by 3–4 orders of magnitude. The author's thesis follows directly: on real hardware "the backlue of a control plane isn't only to block bad requests but tosee, attribute, and route around model cost and unreliability. That's why the project pivots from "firewall" to "operations layer."
+
+---
+Architecture — a 6-service Docker stack
+
+┌────────────┬───────────┬────────────────────────────────────────────────────────────────────────────────────────┐
+│  Service   │   Port    │                    Tech                     │                                 Role                                  │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ Gateway    │ 8000      │ FastAPI / Uvicorn                           │ Orchestrates the 11-stage pipeline + emits all telemetry              │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ Presidio   │ 8001      │ Microsoft Presidio + spaCy (en_core_web_lg) │ ML-based PII NER (the "Layer B" detector)                             │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ OPA        │ 8181      │ Open Policy Agent (Rego)                    │ Policy-as-code authorization decisions                                │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ Ollama     │ 11434     │ Ollama (phi3:mini, qwen2.5:1.5b)            │ Local FM backend — runs on the host, reached via host.docker.internal │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ Prometheus │ 9090      │ Prometheus                                  │ Metrics scraping                                                      │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────┤
+│ Grafana    │ 3001→3000 │ Grafana                                     │ 20-panel dashboard (admin/sentinel)                                   │
+└────────────┴───────────┴────────────────────────────────────────────────────────────────────────────────────────┘
+
+The gateway is the only thing that holds logic; the other five ato. The design is explicitly model-agnostic — the pipelineoperates on text + metadata, independent of which model generates the response.
+
+---
+The 11-stage request pipeline
+
+Every request to /v1/chat traverses these in order. Each stage i / redact / re-route / deny, and each records its own latency_msinto a HopRecord:
+
+1. JWT Auth (middleware/auth.py) — HS256 bearer token, extracts user_id + role (admin/analyst/guest). No anonymous path.
+2. Rate Limit (middleware/rate_limit.py) — in-memory sliding win/ analyst 20 / guest 5 per minute. Framed as "the firstcost-control stage."
+3. Sanitize (scanning/sanitize.py) — NFKC normalization + homoglth → ASCII) + zero-width character stripping. Defeats exact-matchscanner evasion (e.g. a Cyrillic "і" in "іgnore").
+4. PII Scan (scanning/pii.py) — two-layer (detailed below), circlosed.
+5. Injection Scan (scanning/injection.py) — ~51 regex patterns + token-splitting + leetspeak normalization.                                          6. Risk Score (scanning/risk.py) — capped aggregation of all fincore.
+7. Classifier (backends/classifier.py) — assigns complexity_tier + intent_class. This is "Hop 1" of the compound pipeline.                           8. OPA Policy (policy/opa_client.py) — sends full context to OPAroute. Fail-closed.
+9. Model Routing (policy/router.py) — resolves the final model string from role + risk + OPA + complexity.                                           10. FM Backend (backends/ollama.py) — the actual generation callal token counts + latency.
+11. Output Scan (scanning/output.py) — 16 secret/credential patterns + Shannon-entropy check on the model's response before returning it.            
+The pipeline is fail-closed by design: a dependency failure (Presidio down, OPA unreachable) results in denial, never silent pass-through — with one deliberate, documented exception (see routing below).
+
+---
+The key v2 innovation: two routing modes
+
+This is the heart of the "compound FMware" story, and it's where the docs are confusing but the code is unambiguous. The mode is chosen by the request's model field:
+
+Explicit mode (model: "phi3:mini" or any named model) — back-com
+- Classifier uses the fast heuristic classify() (<1 ms, no model call) — word-count + keyword rules.
+- One generation call. Behaves byte-for-byte like the pre-v2 gat
+
+Auto mode (model: "auto") — the compound 2-hop pipeline:
+- Hop 1: classify_llm() makes a real but capped LLM call to qwen2.5:1.5b (num_predict=5, temp=0) to get SIMPLE/MODERATE/COMPLEX. This is the authentic
+"LLM-as-router" pattern — cheap because it generates ≤5 tokens.
+- Model selection: COMPLEXITY_MODEL_MAP sends simple/moderate → cheap qwen2.5:1.5b, complex → standard phi3:mini.
+- Hop 2: generation on the selected model.
+
+▎ Important reconciliation (the two narrative docs seem to contre settles it): explain.md describes the classifier as a "<1 msheuristic," while fmops.md describes an "LLM classifier." Both are true — the code contains and uses both, selected by mode. fmops.md is explicitly labeled a historical Phase-1 design record; explain.md is the current re comes from the heuristic; only complexity_tier upgrades to theLLM in auto mode, and it degrades to the heuristic on any classifier failure (fail-safe, not fail-closed — because model selection is an optimization, not a security control).
+
+---
+Governance scanners, in depth
+
+PII (pii.py) — the two-layer design that was v2's headline fix:
+- Layer A: local regex pre-filter (SSN, credit card, IBAN at scoB/medical at 0.25–0.3). High-recall for structured PII.
+- Layer B: Presidio NER over HTTP (confidence ≥ 0.7) for unstructured PII like names.
+- Overlap-dedup, then _redact replaces spans with [ENTITY_TYPE] II.
+- Circuit breaker (3 failures → open for 30 s) + fail-closed 503 only if Presidio is down and regex found nothing — an elegant nuance: if regex already caught
+something, it doesn't need Presidio to be up.
+
+Injection (injection.py) — ~51 patterns scored 0.4–0.9 across inreak, role reassignment, system-prompt extraction, fictionalframing, the "grandma exploit," base64/hex payloads, model control tokens ([INST], <|im_start|>), and shell commands. Pre-processing collapses token-splitting
+separators and translates leetspeak (0→o, 3→e…) so Ign0re prev1o
+
+Risk (risk.py) — not a simple sum: each scanner has a cap (pii: 1.0, anomaly: 0.5), scores are capped per-scanner then summed,then clamped to 1.0. Levels: low <0.3, medium <0.6, high <0.8, critical ≥0.8. This "capped continuous aggregation" is called out as a deliberate design choice over binary gates.
+
+Output (output.py) — 16 patterns for leaked secrets in the respotHub ghp_, private keys, DB connection strings, internal IPs) +Shannon entropy > 4.5 on long strings. Critical matches replace the whole response with a block notice.
+
+---                                                                                                                                                           Policy layer (OPA / Rego)
+                                                                                                                                                              opa/policies/sentinel.rego is default allow := false (fail-close
+1. Risk > 0.7 → deny all roles                                                                                                                                2. PII detected + role ≠ admin → deny
+3. Guest requesting any model ≠ phi3:mini → deny                                                                                                              4. Analyst > 20 req/min → deny
+5. Analyst + code-exec keywords (execute, bash, subprocess, shell, os.system…) → deny                                                                         6. Guest + complex + code → deny
+                                                                                                                                                              It also returns a complexity-aware model_route. A nice war-storyltiple simultaneous deny rules originally caused an HTTP 500 (Rego "complete rules" allow only one value), fixed by collecting deny_reasons as a partial set and concat-ing them.                                                
+A subtle architectural wrinkle the design docs are honest about: OPA runs at stage 8, before the model is finally chosen at stage 9. In auto mode the gateway passes phi3:mini as a placeholder to satisfy the guest-model-locion afterward. Per-hop independent governance is explicitlydeferred to "Phase 2."
+
+---
+Observability & cost attribution — the real point
+
+This is what makes it an "operations" project rather than a "sec
+
+- 16 Prometheus metrics (8 original + 8 new in v2): per-hop lateclassifier tier/intent counters, backend timeout/error/latency,token throughput, estimated cost.
+- Grafana dashboard: 20 JSON objects (5 row headers + 15 real paop latency breakdown, cost/token attribution, classifierdistribution, and security signals.
+- Cost attribution (cost.py): uses real Ollama token counts (proen available, applies shadow pricing (phi3 $0.15/$0.60, qwen$0.05/$0.20 per 1M tokens) — local inference is $0.00 actual, but it estimates the cloud-equivalent cost per hop.
+- Privacy-preserving audit log (logger.py): JSONL, rotating. Cru logged — only a sha256:-prefixed 8-char hash + length. Recordsthe full hop_timings array, tiers, tokens, cost, and defines pipeline_overhead_ms = total − sum(hops) as "the measurable cost of the control plane itself."
+- /v1/pipeline/hops endpoint: live p50/p95/mean per hop from an last 500 requests (thread-locked deque).
+- research/analyze_logs.py: mines the audit log for 8 FMware operational anti-patterns (AP-01 Timeout Cascade, AP-02 Cost Blowup, AP-03 Risk Drift, AP-04 PII
+Allowed, AP-05 Hopless Requests, AP-06 LLM Dominance, AP-07 Redue). This is the "software analytics" research contribution —treating execution traces as a mineable substrate.
+
+---
+Research framing (docs/positioning.md)
+
+The repo is explicitly developed toward the "production-ready trenda and cites four papers (FSE 2024 arXiv:2402.15943, KDD 2025arXiv:2505.10640, a TOSEM paper, and SE 3.0 arXiv:2410.06107). It maps itself onto five research axes: operationalizing FMs, software performance engineering,
+monitoring distributed systems, software analytics, and softwareeliverable is a preprint titled "SENTINEL: An OperationalTrustworthiness Layer for Compound FMware." The tone throughout is deliberately candid and self-critical — it foregrounds its own weaknesses as a credibility
+strategy ("an operational tool's credibility depends on it").
+
+---
+Testing strategy
+
+A two-tier approach:
+
+- Fast unit tests (no running services): test_injection_unit.py (leetspeak/keylogger/reverse-shell regressions, imports the scanner directly) and
+test_pii_unit.py (monkeypatches httpx to fake Presidio, verifiesginal text). These run on the host via requirements-dev.txt.
+- Live integration tests (hit the running gateway over HTTP against real Ollama): test_auth.py (~6 cases), test_policy.py (~18 cases across 6 blocks — routing
+tiers, all 5 policy rules, auth), test_inspection.py (~15 cases olds, output scanner, pipeline-field integrity), plustest_routing_multimodel.py (auto-mode two-hop) and the tests/attacks/ suite. A neat touch in conftest.py: tests fetch tokens from the /token endpoint rather
+than copying the JWT secret. sentinel_test.rego unit-tests the packs/evaluation/run_comparison.py benchmarks against LLM Guard for a fair external comparison.
+
+---
+Benchmark results — and honest caveats
+
+The reproducible benchmark (run_benchmark.py) is two-pass: Pass y in explicit mode; Pass 2 gathers two-hop operational evidence in auto mode. Dataset: 106 prompts (56 attacks + 50 benign).
+
+The latest run (2026-08-12) reports Pass 1 at 100% detection (55/55), 0% false positives (0/23), F1 = 1.0 — an improvement over the older 2026-06-01 numbers
+still cited in the README (83.6% recall). Pass 2 confirms the coof requests routed to phi3, 34.5% to qwen, mean shadow cost$0.00027/req, mean latency ~76 s.
+
+Two caveats worth flagging, because they matter for interpreting the results:
+
+1. The "0/6 PII" story is a moving target. README's measured-reality table still shows the old v1 0/6 PII gap and 83.6% injection recall (from 2026-06-01); the
+latest report shows 100% across the board. The numbers quoted infferent benchmark runs — worth normalizing if this becomes apreprint.
+2. The "28 availability errors" label conflates two very differeport, only ~8 of them are genuine ~180 s backend timeouts(SOC-007, SAFE-003/010/023-026/031). The other ~19 (SAFE-035 through SAFE-050) errored in 2–12 ms — far too fast to be a model timeout. Those are almost
+certainly HTTP 4xx validation rejections (empty / over-length /  not backend availability problems. Lumping them under "backendtimeout/error" slightly overstates the reliability problem and understates the benign-completion denominator. This is exactly the kind of measurement nuance
+the project's own philosophy says it should expose.
+
+---
+My overall assessment
+
+What's genuinely strong:
+- The engineering is real and coherent — fail-closed throughout,e rate limiting and ring buffers, real token accounting,privacy-preserving logs. It's not a toy.
+- The reframing is smart and well-executed. Turning "yet anothero "an observability/operations story about compound FM pipelines"is both more defensible academically and more honest about where the real cost lives.
+- Intellectual honesty is a deliberate through-line — documentede haven't run competitors head-to-head," anti-patterns that catchthe tool's own misbehavior.
+
+Tensions / rough edges I noticed:
+- Documentation drift. Stage counts (10 vs 11), metric counts (1S/AVAILABILITY_MODELS typo, and the heuristic-vs-LLM classifierconfusion all trace to v1→v2 evolution. The code is the ground truth; the prose lags it in places.
+- The benchmark's headline numbers are hardware-bound and datasenode, CPU). 100% detection on a curated 55-attack set isencouraging but not a strong external claim, and the author knows it.
+- The security surface is regex-heavy — 51 injection patterns angnature-based approach that will always trail novel attacks. Thesanitize+leetspeak+token-split layer mitigates but doesn't eliminate this.
+
+Bottom line: SENTINEL is a well-built, self-aware capstone/research-testbed that deliberately transcends its "LLM firewall" origins. Its most valuable and
+original contribution isn't the blocking — it's the per-hop inst, and log-based anti-pattern mining that let you reasonoperationally about a compound multi-model FM pipeline. The security layer is the demo; the observability substrate is the actual research.
+
+If you'd like, I can go deeper on any single layer — e.g. trace one auto-mode request end-to-end through the code, audit the injection/PII regexes for gaps, or
+reconcile the doc discrepancies into an accurate spec.
+
+✻ Baked for 7m 49s
+
+● Agent "Map the test suite" finished · 6m 32s
+
+The test-suite map just completed and it sharpens (and in one spion I gave you. Folding in the precise picture:
+
+Testing — the exact numbers
+
+90 Python test_ functions across 7 files + 23 native OPA rego te markers — the unit/integration split is by convention only. Thecritical structural fact: 72 of the 90 Python tests are live-stack integration tests (they need gateway + OPA + Presidio + a real Ollama model all up, with 120
+s timeouts), and only 18 are pure in-process unit tests. The rega test.
+
+┌────────────────────────────┬───────┬─────────────┬──────────────────────────────────┐
+│            File            │ Count │    Type     │                            Covers                             │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_auth.py               │ 6     │ integration │ JWT: missing/fake/expired/valid tokens, /health               │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_policy.py             │ 18    │ integration │ All OPA rules end-to-end (except rate limit)                  │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_inspection.py         │ 15    │ integration │ Injection, PII, risk thresholds, output scan, field integrity │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_attacks.py            │ 33    │ integration │ "Red Team Suite v2" — 30 attacks in 5 categories + 3 bonus    │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_routing_multimodel.py │ 14    │ unit        │ The auto-vs-explicit routing contract — most rigorous file    │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_injection_unit.py     │ 3     │ unit        │ Leetspeak / keylogger / reverse-shell regressions             │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ test_pii_unit.py           │ 1     │ unit        │ Presidio offset mapping (httpx mocked)                        │
+├────────────────────────────┼───────┼─────────────┼──────────────────────────────────┤
+│ sentinel_test.rego         │ 23    │ native OPA  │ Authoritative policy logic, incl. the 0.7-boundary edge       │
+└────────────────────────────┴───────┴─────────────┴──────────────────────────────────┘
+
+What's genuinely well-tested: authorization is doubly covered — layer (including a nice test that risk = 0.7 exactly is allowed,proving the rule uses strict >) and end-to-end through the gateway. Model routing has the strongest unit coverage, with explicit regression tests guarding
+"explicit mode must ignore OPA's route" and "auto mode must let complexity map."
+
+One correction to what I said earlier
+
+I conflated two comparison harnesses. To be precise:
+- research/test_competitors.py → runs LLM Guard on the dataset.
+- tests/attacks/evaluation/run_comparison.py → compares SENTINEL-8b) and raw Gemini 2.0 Flash. Neither is a pytest test (no test_prefix); both are evidence-gathering scripts that emit CSVs and gate nothing.
+
+Gaps worth knowing (for the owner)
+
+1. 80% of Python tests can't run without a live model host — no TestClient/mocked path, so the suite is slow and won't run in lean CI. If :8000 is down, most
+tests error rather than fail cleanly.
+2. Loosened assertions can mask regressions — many injection/attack tests accept "200-with-a-flag or 403," and the output-scanner test depends on the model
+actually echoing an API-key string. A prompt that should block bpasses.
+3. Thin scanner unit coverage. No dedicated unit tests for output.py (the entropy/secret scanner — a headline feature), sanitize.py, cost.py, opa_client.py's
+fail-closed path, or — most notably — classifier.py. That's the duces the complexity_tier/intent_class values that every v2routing rule and Policy 6 depend on, yet nothing directly tests the component that produces them.
+4. Rate limiting (Policy 4) is tested only in rego (21-blocked v test ever drives >20 req/min.
+                                                                                                                                                               That completes the picture — the test strategy mirrors the projeg, deterministic coverage of the policy/routing decision logic(the research-relevant core), with the broader security-scanning behavior verified more loosely through live black-box runs. My offer stands if you want me to trace a single auto-mode request end-to-end through the code, or.py unit tests.

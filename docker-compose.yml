@@ -1,37 +1,41 @@
 services:
-
   gateway:
     build: ./gateway
     ports:
       - '8000:8000'
     environment:
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://host.docker.internal:11434
       - JWT_SECRET=${JWT_SECRET}
       - PRESIDIO_URL=http://presidio:8001
       - OPA_URL=http://opa:8181
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080}
       - MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+      # Local demo/benchmark convenience only. Set false in any deployment
+      # that receives tokens from a real identity provider.
+      - ENABLE_DEMO_TOKEN_ENDPOINT=${ENABLE_DEMO_TOKEN_ENDPOINT:-true}
       - LOG_DIR=/app/logs
+      # ── Multi-model routing (v2) ────────────────────────────────────────
+      # CLASSIFIER_MODEL runs hop-1 (capped complexity classification call).
+      # CHEAP_MODEL serves simple/moderate prompts in auto mode.
+      # STANDARD_MODEL is the default generation model and the guest-pinned model.
+      # Requires: ollama pull qwen2.5:1.5b  (on the host running Ollama)
+      - CLASSIFIER_MODEL=${CLASSIFIER_MODEL:-qwen2.5:1.5b}
+      - CHEAP_MODEL=${CHEAP_MODEL:-qwen2.5:1.5b}
+      - STANDARD_MODEL=${STANDARD_MODEL:-phi3:mini}
+      - CLASSIFIER_MAX_TOKENS=${CLASSIFIER_MAX_TOKENS:-5}
+      - CLASSIFIER_TIMEOUT=${CLASSIFIER_TIMEOUT:-20}
     depends_on:
-      - ollama
       - presidio
       - opa
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./gateway:/app
       - ./gateway/logs:/app/logs
-
   presidio:
     build: ./presidio
     ports:
       - '8001:8001'
-
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - '11434:11434'
-    volumes:
-      - ollama_data:/root/.ollama
-
   opa:
     image: openpolicyagent/opa:latest
     command: run --server --addr :8181 /policies
@@ -39,7 +43,6 @@ services:
       - ./opa/policies:/policies
     ports:
       - '8181:8181'
-
   prometheus:
     image: prom/prometheus:latest
     volumes:
@@ -48,7 +51,6 @@ services:
       - '9090:9090'
     depends_on:
       - gateway
-
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -60,7 +62,5 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
-
 volumes:
-  ollama_data:
   grafana_data:

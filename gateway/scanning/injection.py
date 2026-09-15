@@ -74,9 +74,9 @@ INJECTION_PATTERNS = [
 
     # ── HIGH: Fictional/hypothetical framing bypass ──────────────────────
     (r"hypothetically\s+(speaking|if|assuming|what\s+if)",
-     "Hypothetical framing bypass", "high", 0.6),
+     "Hypothetical framing bypass", "high", 0.8),
     (r"in\s+a\s+(fictional|fantasy|story|movie|game|hypothetical)\s+(world|setting|scenario|universe)",
-     "Fictional world framing bypass", "high", 0.6),
+     "Fictional world framing bypass", "high", 0.8),
     (r"(pretend|imagine|suppose)\s+(this\s+is\s+)?(just\s+)?(a\s+)?(game|story|fiction|test|simulation|roleplay)",
      "Fictional context bypass", "high", 0.6),
     (r"(imagine|pretend|suppose)\s+you\s+(are|were)\s+",
@@ -111,6 +111,8 @@ INJECTION_PATTERNS = [
      "Command execution attempt", "critical", 0.9),
     (r"(rm\s+-rf|chmod\s+[0-9]+|sudo\s+\w+|curl\s+.{1,50}\|\s*(ba)?sh|wget\s+.{1,50}\|\s*(ba)?sh)",
      "Dangerous shell command", "critical", 0.9),
+    (r"\b(reverse\s+shell|keylogger)\b",
+     "Malware payload request", "critical", 0.8),
     (r"(\/etc\/passwd|\/etc\/shadow|\/etc\/sudoers|\/proc\/self|\/root\/)",
      "Sensitive system path reference", "critical", 0.9),
     (r"(subprocess|os\.system|os\.popen|exec\(|eval\(|__import__)",
@@ -141,6 +143,8 @@ _SPLIT_KEYWORDS = [
     "bypass filter", "unrestricted ai",
 ]
 
+_LEET_TRANSLATION = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t"})
+
 
 def _detect_token_splitting(text: str) -> list:
     """Detect keywords split with separators like 'i.g.n.o.r.e' or 'i g n o r e'."""
@@ -163,9 +167,25 @@ def scan_injection(ctx: RequestContext) -> RequestContext:
     """Multi-layer injection scan: normalize → regex → token-split detection."""
     normalized = normalize_text(ctx.clean_prompt).lower()
 
+    # Test both normalised text and a conservative leetspeak variant.  The
+    # latter catches common bypasses such as "Ign0re prev1ous" without
+    # modifying the prompt passed downstream.
+    candidates = [normalized]
+    leet_normalized = normalized.translate(_LEET_TRANSLATION)
+    if leet_normalized != normalized:
+        candidates.append(leet_normalized)
+
+    seen_patterns = set()
     for pattern, description, severity, score_delta in INJECTION_PATTERNS:
-        match = re.search(pattern, normalized, re.IGNORECASE)
+        match = None
+        for candidate in candidates:
+            match = re.search(pattern, candidate, re.IGNORECASE)
+            if match:
+                break
         if match:
+            if description in seen_patterns:
+                continue
+            seen_patterns.add(description)
             ctx.findings.append(Finding(
                 scanner="injection",
                 severity=severity,

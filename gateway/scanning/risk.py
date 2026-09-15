@@ -1,4 +1,3 @@
-from typing import Tuple
 from context import RequestContext, Finding
 
 # Risk thresholds
@@ -52,29 +51,3 @@ def get_risk_level(score: float) -> str:
         return "high"
     else:
         return "critical"
-
-
-def should_block(score: float, role: str) -> Tuple[bool, str]:
-    """
-    Decides if request should be blocked based on
-    risk score AND user role.
-    Returns (block: bool, reason: str)
-    """
-    level = get_risk_level(score)
-
-    if level == "critical":
-        return True, f"Critical risk score {score:.2f} — blocked for all roles"
-
-    if level == "high":
-        if role in ["guest", "analyst"]:
-            return True, f"High risk score {score:.2f} — blocked for role '{role}'"
-        else:
-            # Admin gets flagged but not blocked
-            return False, f"High risk score {score:.2f} — flagged for admin review"
-
-    if level == "medium":
-        if role == "guest":
-            return False, f"Medium risk — guest allowed with extra scrutiny"
-        return False, f"Medium risk — within acceptable range"
-
-    return False, "Low risk — allowed"
